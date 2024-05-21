@@ -12,7 +12,7 @@ from extensions.ext_database import db
 from libs.helper import email as email_validate
 from libs.password import hash_password, password_pattern, valid_password
 from libs.rsa import generate_key_pair
-from models.account import Tenant
+from models.account import Tenant, TenantAccountJoin, TenantAccountRole, TenantAccountJoinRole
 from models.dataset import Dataset, DatasetCollectionBinding, DocumentSegment
 from models.dataset import Document as DatasetDocument
 from models.model import Account, App, AppAnnotationSetting, AppMode, Conversation, MessageAnnotation
@@ -448,9 +448,82 @@ def convert_to_agent_apps():
     click.echo(click.style('Congratulations! Converted {} agent apps.'.format(len(proceeded_app_ids)), fg='green'))
 
 
+@click.command('create-new-workspace', help='Create a new workspace for LLM credentials. '
+                                            'This will initialize a new workspace with a unique ID and key pair.')
+@click.option('--email', prompt='Please enter the email of the account that you want to create the new workspace for',
+              help='The email of the account to create the new workspace.')
+@click.option('--name', prompt='Please enter the name for the new workspace',
+              help='The name for the new workspace.')
+def create_new_workspace(email, name):
+    """
+    Create a new workspace for LLM credentials.
+    This will initialize a new workspace with a unique ID and key pair.
+    """
+    if current_app.config['EDITION'] != 'SELF_HOSTED':
+        click.echo(click.style('Sorry, this command only supports SELF_HOSTED mode.', fg='red'))
+        return
+
+    # Check if the username exists
+    account = db.session.query(Account). \
+        filter(Account.email == email). \
+        one_or_none()
+    if not account:
+        click.echo(click.style('sorry. the account: [{}] not exist .'.format(email), fg='red'))
+        return
+
+    # List existing workspaces
+    click.echo('Existing workspaces:')
+    for workspace in db.session.query(Tenant).all():
+        click.echo(f'- Workspace ID: {workspace.id}, Name: {workspace.name}')
+
+    # check if the workspace name is already taken
+    existing_workspace = db.session.query(Tenant).filter_by(name=name).first()
+    if existing_workspace:
+        click.echo(click.style(f'The workspace name "{name}" is already taken. Please choose a different name.', fg='red'))
+        return
+    new_workspace = Tenant(name=name)
+    db.session.add(new_workspace)
+    db.session.commit()
+
+    # generate key pair for the new workspace
+    new_workspace.encrypt_public_key = generate_key_pair(new_workspace.id)
+    db.session.commit()
+
+    # append new record to tenant account join table
+    new_account_tenant_join = TenantAccountJoin(account_id=account.id,
+                                                tenant_id=new_workspace.id,
+                                                role=TenantAccountJoinRole.OWNER.value)
+    db.session.add(new_account_tenant_join)
+    db.session.commit()
+
+    click.echo(click.style(f'Workspace "{name}" has been created with ID: {new_workspace.id}', fg='green'))
+
+@click.command(name='rename-workspace', help='Rename the name of workspace.')
+@click.option('--name', prompt='Please enter the name for the workspace', help='The name for the workspace.')
+@click.option('--new_name', prompt='Please enter the new name for the workspace', help='The new name for the workspace.')
+def rename_workspace(name, new_name):
+
+    if current_app.config['EDITION'] != 'SELF_HOSTED':
+        click.echo(click.style('Sorry, this command only supports SELF_HOSTED mode.', fg='red'))
+        return
+
+    workspace = db.session.query(Tenant).filter_by(name=name).first()
+    if not workspace:
+        click.echo(click.style(f'The workspace "{name}" does not exist.', fg='red'))
+        return
+
+    workspace.name = new_name
+    db.session.commit()
+
+    click.echo(click.style(f'The workspace "{name}" has been renamed to "{new_name}".', fg='green'))
+
+
+
 def register_commands(app):
     app.cli.add_command(reset_password)
     app.cli.add_command(reset_email)
     app.cli.add_command(reset_encrypt_key_pair)
     app.cli.add_command(vdb_migrate)
     app.cli.add_command(convert_to_agent_apps)
+    app.cli.add_command(create_new_workspace)
+    app.cli.add_command(rename_workspace)
